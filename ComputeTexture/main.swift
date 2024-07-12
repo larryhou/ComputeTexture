@@ -12,12 +12,20 @@ import Cocoa
 
 let COLOR_CHANNEL_THRESHOLD = 187
 let SERVER_ADDRESS = "10.15.149.23:56789"
+let THREAD_COUNT = 16
+
+class Semaphore {
+    var compute:[DispatchSemaphore] = []
+    var loading:[DispatchSemaphore] = []
+}
 
 class Context {
     var device:MTLDevice
-    var program:MTLComputePipelineState?
+    var program:MTLComputePipelineState!
     var queue:[MTLCommandQueue] = []
-    var semaphore:DispatchSemaphore?
+    
+    var semaphore:Semaphore = .init()
+    
     var gputrace = false
     
     var lock:NSLock = .init()
@@ -38,8 +46,8 @@ extension Int {
 
 enum TextureError: Error {
     case notSupported
-    case noMoreTask
-    case noImage
+    case noMoreComputeJob
+    case noTextureContent
 }
 
 struct TextureContext {
@@ -53,7 +61,7 @@ struct TextureContext {
 }
 
 extension MTKTextureLoader {
-    func newTexture(_ ctx: Context) throws -> [TextureContext] {
+    func newTexture(_ ctx: Context, semaphore:DispatchSemaphore) throws -> [TextureContext] {
         var data:Data?
         var filename:String?
         var components = URLComponents(string: "http://\(SERVER_ADDRESS)/compute")!
@@ -62,7 +70,6 @@ extension MTKTextureLoader {
         ]
         
         var error:TextureError?
-        let semaphore = DispatchSemaphore(value: 0)
         let task = URLSession.shared.dataTask(with: .init(url: components.url!)) { raw, rsp, err in
             if let rsp = rsp as? HTTPURLResponse {
                 if let group = rsp.value(forHTTPHeaderField: "Compute-Group"), ctx.id == nil {
@@ -73,7 +80,7 @@ extension MTKTextureLoader {
                 
                 switch rsp.statusCode {
                 case 410: 
-                    error = .noMoreTask
+                    error = .noMoreComputeJob
                 case 200:
                     if let name = rsp.value(forHTTPHeaderField: "Compute-File") {
                         if !name.hasSuffix(".PNG") {
@@ -85,7 +92,7 @@ extension MTKTextureLoader {
                     }
                     
                 default:
-                    error = .noImage
+                    break
                 }
             }
             
@@ -107,7 +114,7 @@ extension MTKTextureLoader {
             return textures
         }
         
-        throw error ?? .noImage
+        throw error ?? .noTextureContent
     }
     
     func newTexture(_ data:Data, offset:Int) throws -> (TextureContext, Int) {
@@ -141,16 +148,18 @@ func draw(_ ctx:Context, queue:Int) throws {
     let fm = FileManager.default
     
     let loader = MTKTextureLoader(device: ctx.device)
-    let textures = try loader.newTexture(ctx)
+    let textures = try loader.newTexture(ctx, semaphore: ctx.semaphore.loading[queue])
     let albedo = textures[0]
     let source = albedo.texture!
     
-    print("LOAD \(albedo.texture) \(source.description)")
+    print("LOAD \(albedo.path) \(String(describing: albedo.texture))")
+    
     if ctx.gputrace {
         let cd = MTLCaptureDescriptor()
         cd.captureObject = ctx.device
         cd.destination = .gpuTraceDocument
-        cd.outputURL = URL(fileURLWithPath: "/Users/larryhou/Downloads/ComputeTexture.gputrace")
+        
+        cd.outputURL = URL(fileURLWithPath: NSString(string: "~/Downloads/ComputeTexture.gputrace").expandingTildeInPath)
         if let url = cd.outputURL, fm.fileExists(atPath: url.path) { try fm.removeItem(at: url) }
         try MTLCaptureManager.shared().startCapture(with: cd)
     }
@@ -164,7 +173,7 @@ func draw(_ ctx:Context, queue:Int) throws {
     
     let td = MTLTextureDescriptor()
     td.textureType = source.textureType
-    td.pixelFormat = .rgba16Float
+    td.pixelFormat = source.pixelFormat
     td.usage = [.shaderRead, .shaderWrite]
     td.mipmapLevelCount = source.mipmapLevelCount
     td.width = source.width
@@ -183,7 +192,8 @@ func draw(_ ctx:Context, queue:Int) throws {
     
     let cpd = MTLComputePassDescriptor()
     cpd.dispatchType = .concurrent
-    if let encoder = buffer.makeComputeCommandEncoder(descriptor: cpd), let state = ctx.program {
+    if let encoder = buffer.makeComputeCommandEncoder(descriptor: cpd) {
+        let state = ctx.program!
         encoder.setComputePipelineState(state)
         encoder.setBytes(&uniform, length: MemoryLayout<Uniform>.stride, index: 0)
         encoder.setBuffer(putback, offset: 0, index: 1)
@@ -222,8 +232,19 @@ func draw(_ ctx:Context, queue:Int) throws {
         encoder.endEncoding()
     }
     
+    let size = MTLSize(width: td.width, height: td.height, depth: 1)
+    let data = ctx.device.makeBuffer(length: td.width * td.height * 4 * td.arrayLength, options: [.storageModeManaged])!
     if let encoder = buffer.makeBlitCommandEncoder() {
         encoder.synchronize(resource: putback)
+        
+        var offset = 0
+        for _ in 0..<td.arrayLength {
+            let bytesPerImage = size.width * size.height * 4
+            encoder.copy(from: target, sourceSlice: 0, sourceLevel: 0, sourceOrigin: .init(), sourceSize: size,
+                         to: data, destinationOffset: offset, destinationBytesPerRow: bytesPerImage/size.height, destinationBytesPerImage: bytesPerImage)
+            offset += bytesPerImage
+        }
+        
         encoder.endEncoding()
     }
     
@@ -237,29 +258,38 @@ func draw(_ ctx:Context, queue:Int) throws {
     let level = putback.contents().advanced(by: 0).load(as: Int32.self)
     let count = putback.contents().advanced(by: 4).load(as: Int32.self)
     if level >= uniform.threshold {
-        if let image = CIImage(mtlTexture: target, options: [.colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!]) {
-            let bitmap = NSBitmapImageRep(ciImage: image.oriented(.downMirrored))
-            if let data = bitmap.representation(using: .png, properties: [:]) {
-                var components = URLComponents(string: "http://\(SERVER_ADDRESS)/compute")!
-                components.queryItems = [
-                    .init(name: "path", value: albedo.path),
-                    .init(name: "id", value: ctx.id)
-                ]
-                
-                var req = URLRequest(url: components.url!)
-                req.httpMethod = "PUT"
-                req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-                req.setValue("\(count)/\(td.width*td.height)", forHTTPHeaderField: "Compute-Ratio")
-                req.httpBody = data
-                URLSession.shared.dataTask(with: req, completionHandler: { _, rsp, _ in
-                    if let rsp = rsp as? HTTPURLResponse {
-                        print("SEND \(albedo.path) \(rsp.statusCode)")
-                    }
-                }).resume()
-                
-                target.setPurgeableState(.volatile)
-                putback.setPurgeableState(.volatile)
-            }
+        var buffer:UnsafeMutablePointer<UInt8>? = data.contents().withMemoryRebound(to: UInt8.self, capacity: data.length) {$0}
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: &buffer,
+                         pixelsWide: size.width,
+                         pixelsHigh: size.height,
+                         bitsPerSample: 8,
+                         samplesPerPixel: 4,
+                         hasAlpha: true,
+                         isPlanar: false,
+                         colorSpaceName: .deviceRGB,
+                         bytesPerRow: size.width*4,
+                         bitsPerPixel: 32)
+        
+        if let data = bitmap?.representation(using: .png, properties: [:]) {
+            var components = URLComponents(string: "http://\(SERVER_ADDRESS)/compute")!
+            components.queryItems = [
+                .init(name: "path", value: albedo.path),
+                .init(name: "id", value: ctx.id)
+            ]
+            
+            var req = URLRequest(url: components.url!)
+            req.httpMethod = "PUT"
+            req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            req.setValue("\(count)/\(td.width*td.height)", forHTTPHeaderField: "Compute-Ratio")
+            req.httpBody = data
+            URLSession.shared.dataTask(with: req, completionHandler: { _, rsp, _ in
+                if let rsp = rsp as? HTTPURLResponse {
+                    print("SEND \(albedo.path) \(rsp.statusCode)")
+                }
+            }).resume()
+            
+            target.setPurgeableState(.volatile)
+            putback.setPurgeableState(.volatile)
         }
     }
 }
@@ -270,12 +300,12 @@ if let device = MTLCreateSystemDefaultDevice() {
         ctx.program = try device.makeComputePipelineState(function: library.makeFunction(name: "compute")!)
     }
     
-    let limit = 8
-    for _ in 0..<limit {
-        if let queue = device.makeCommandQueue() { ctx.queue.append(queue) }
+    for _ in 0..<THREAD_COUNT {
+        ctx.queue.append(device.makeCommandQueue()!)
+        ctx.semaphore.compute.append(.init(value: 0))
+        ctx.semaphore.loading.append(.init(value: 0))
     }
     
-    ctx.semaphore = .init(value: limit)
     let queue = DispatchQueue(label: "Turbo", attributes: .concurrent)
     for (n, value) in CommandLine.arguments.enumerated() {
         if n > 0 {
@@ -287,39 +317,36 @@ if let device = MTLCreateSystemDefaultDevice() {
     }
     
     var compelete = false
-    
-    var i = 0
-    while !compelete || i == 8 {
-        ctx.semaphore?.wait()
-        let index = i % limit
+    for i in 0..<THREAD_COUNT {
+        let index = i
         queue.async {
-            do { try draw(ctx, queue: index) }
-            catch {
-                if let err = error as? TextureError, err == TextureError.noMoreTask {
-                    compelete = true
-                } else {
-                    print("ERROR \(error)")
+            while !compelete {
+                do { try draw(ctx, queue: index) }
+                catch {
+                    if let err = error as? TextureError, err == TextureError.noMoreComputeJob {
+                        compelete = true
+                    } else {
+                        print("ERROR \(error)")
+                    }
                 }
             }
-            ctx.semaphore?.signal()
+            ctx.semaphore.compute[index].signal()
         }
-        
-        i = i + 1
     }
     
-    for _ in 0..<limit { ctx.semaphore?.wait()   }
-    for _ in 0..<limit { ctx.semaphore?.signal() }
-    
-    Thread.sleep(until: .now.addingTimeInterval(10))
-    
+    for i in 0..<ctx.semaphore.compute.count { ctx.semaphore.compute[i].wait() }
     
     var components = URLComponents(string: "http://\(SERVER_ADDRESS)/compute/summary")!
-    components.queryItems = [
-        .init(name: "id", value: ctx.id)
-    ]
+    components.queryItems = [.init(name: "id", value: ctx.id)]
     let url = components.url!
-    print("\(url)")
-    URLSession.shared.dataTask(with: .init(url: url)).resume()
-    Thread.sleep(until: .now.addingTimeInterval(1))
+    
+    let exit = ctx.semaphore.loading[0]
+    URLSession.shared.dataTask(with: .init(url: url), completionHandler: { _, rsp, _ in
+        if let rsp = rsp as? HTTPURLResponse {
+            print("SUMMARY \(rsp.statusCode) \(url) \(rsp.allHeaderFields)")
+        }
+        exit.signal()
+    }).resume()
+    exit.wait()
 }
 

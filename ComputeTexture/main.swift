@@ -118,7 +118,7 @@ extension MTKTextureLoader {
     }
     
     func newTexture(_ data:Data, offset:Int) throws -> (TextureContext, Int) {
-        var ptr = data.withUnsafeBytes ({$0}).baseAddress!
+        var ptr = data.withUnsafeBytes ({$0.baseAddress})!
         ptr = ptr.advanced(by: offset)
         
         let total = Int(ptr.load(as: Int32.self))
@@ -173,7 +173,7 @@ func draw(_ ctx:Context, queue:Int) throws {
     
     let td = MTLTextureDescriptor()
     td.textureType = source.textureType
-    td.pixelFormat = source.pixelFormat
+    td.pixelFormat = .rgba8Unorm
     td.usage = [.shaderRead, .shaderWrite]
     td.mipmapLevelCount = source.mipmapLevelCount
     td.width = source.width
@@ -182,7 +182,7 @@ func draw(_ ctx:Context, queue:Int) throws {
     
     guard let target = ctx.device.makeTexture(descriptor: td) else {return}
     
-    let putback = ctx.device.makeBuffer(length: 128, options: [.storageModeManaged])!
+    let stats = ctx.device.makeBuffer(length: 128, options: [.storageModeManaged])!
     var uniform = Uniform(
         brightness: albedo.brightness,
         screen: simd_float2(Float(td.width), Float(td.height)),
@@ -196,7 +196,7 @@ func draw(_ ctx:Context, queue:Int) throws {
         let state = ctx.program!
         encoder.setComputePipelineState(state)
         encoder.setBytes(&uniform, length: MemoryLayout<Uniform>.stride, index: 0)
-        encoder.setBuffer(putback, offset: 0, index: 1)
+        encoder.setBuffer(stats, offset: 0, index: 1)
         
         var flag = textures.count > 1
         encoder.setBytes(&flag, length: MemoryLayout<Bool>.stride, index: 2)
@@ -233,15 +233,15 @@ func draw(_ ctx:Context, queue:Int) throws {
     }
     
     let size = MTLSize(width: td.width, height: td.height, depth: 1)
-    let data = ctx.device.makeBuffer(length: td.width * td.height * 4 * td.arrayLength, options: [.storageModeManaged])!
+    let image = ctx.device.makeBuffer(length: td.width * td.height * 4 * td.arrayLength)!
     if let encoder = buffer.makeBlitCommandEncoder() {
-        encoder.synchronize(resource: putback)
+        encoder.synchronize(resource: stats)
         
         var offset = 0
         for _ in 0..<td.arrayLength {
             let bytesPerImage = size.width * size.height * 4
             encoder.copy(from: target, sourceSlice: 0, sourceLevel: 0, sourceOrigin: .init(), sourceSize: size,
-                         to: data, destinationOffset: offset, destinationBytesPerRow: bytesPerImage/size.height, destinationBytesPerImage: bytesPerImage)
+                         to: image, destinationOffset: offset, destinationBytesPerRow: bytesPerImage/size.height, destinationBytesPerImage: bytesPerImage)
             offset += bytesPerImage
         }
         
@@ -250,15 +250,16 @@ func draw(_ ctx:Context, queue:Int) throws {
     
     buffer.addCompletedHandler { _ in
         source.setPurgeableState(.volatile)
+        target.setPurgeableState(.volatile)
     }
     
     buffer.commit()
     buffer.waitUntilCompleted()
     
-    let level = putback.contents().advanced(by: 0).load(as: Int32.self)
-    let count = putback.contents().advanced(by: 4).load(as: Int32.self)
+    let level = stats.contents().advanced(by: 0).load(as: Int32.self)
+    let count = stats.contents().advanced(by: 4).load(as: Int32.self)
     if level >= uniform.threshold {
-        var buffer:UnsafeMutablePointer<UInt8>? = data.contents().withMemoryRebound(to: UInt8.self, capacity: data.length) {$0}
+        var buffer:UnsafeMutablePointer<UInt8>? = image.contents().bindMemory(to: UInt8.self, capacity: image.length)
         let bitmap = NSBitmapImageRep(bitmapDataPlanes: &buffer,
                          pixelsWide: size.width,
                          pixelsHigh: size.height,
@@ -287,10 +288,10 @@ func draw(_ ctx:Context, queue:Int) throws {
                     print("SEND \(albedo.path) \(rsp.statusCode)")
                 }
             }).resume()
-            
-            target.setPurgeableState(.volatile)
-            putback.setPurgeableState(.volatile)
         }
+        
+        stats.setPurgeableState(.volatile)
+        image.setPurgeableState(.volatile)
     }
 }
 

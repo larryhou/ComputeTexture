@@ -290,7 +290,9 @@ func draw(_ ctx:Context, queue:Int) throws {
             req.setValue("\(count)/\(td.width*td.height)", forHTTPHeaderField: "Compute-Ratio")
             req.httpBody = data
             
+            ctx.condition.lock()
             ctx.uploading += 1
+            ctx.condition.unlock()
             URLSession.shared.dataTask(with: req, completionHandler: { _, rsp, _ in
                 if let rsp = rsp as? HTTPURLResponse {
                     print("SEND \(albedo.path) \(rsp.statusCode)")

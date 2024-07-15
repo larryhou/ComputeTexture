@@ -89,7 +89,7 @@ extension MTKTextureLoader {
                 if let group = rsp.value(forHTTPHeaderField: "Compute-Group"), ctx.id == nil {
                     ctx.session.lock()
                     ctx.id = group
-                    ctx.session.signal()
+                    ctx.session.broadcast()
                     ctx.session.unlock()
                 }
                 

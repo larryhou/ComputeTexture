@@ -182,7 +182,7 @@ func draw(_ ctx:Context, queue:Int) throws {
     
     guard let target = ctx.device.makeTexture(descriptor: td) else {return}
     
-    let stats = ctx.device.makeBuffer(length: 128, options: [.storageModeManaged])!
+    let stats = ctx.device.makeBuffer(length: 128, options: [.storageModeShared])!
     var uniform = Uniform(
         brightness: albedo.brightness,
         screen: simd_float2(Float(td.width), Float(td.height)),
@@ -235,8 +235,6 @@ func draw(_ ctx:Context, queue:Int) throws {
     let size = MTLSize(width: td.width, height: td.height, depth: 1)
     let image = ctx.device.makeBuffer(length: td.width * td.height * 4 * td.arrayLength)!
     if let encoder = buffer.makeBlitCommandEncoder() {
-        encoder.synchronize(resource: stats)
-        
         var offset = 0
         for _ in 0..<td.arrayLength {
             let bytesPerImage = size.width * size.height * 4

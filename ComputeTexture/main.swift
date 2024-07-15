@@ -254,6 +254,11 @@ func draw(_ ctx:Context, queue:Int) throws {
     buffer.commit()
     buffer.waitUntilCompleted()
     
+    defer {
+        stats.setPurgeableState(.volatile)
+        image.setPurgeableState(.volatile)
+    }
+    
     let level = stats.contents().advanced(by: 0).load(as: Int32.self)
     let count = stats.contents().advanced(by: 4).load(as: Int32.self)
     if level >= uniform.threshold {
@@ -287,9 +292,6 @@ func draw(_ ctx:Context, queue:Int) throws {
                 }
             }).resume()
         }
-        
-        stats.setPurgeableState(.volatile)
-        image.setPurgeableState(.volatile)
     }
 }
 

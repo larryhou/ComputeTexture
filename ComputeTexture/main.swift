@@ -66,15 +66,15 @@ struct TextureContext {
 
 extension MTKTextureLoader {
     func newTexture(_ ctx: Context, semaphore:DispatchSemaphore) throws -> [TextureContext] {
+        ctx.session.lock()
         if ctx.id == nil {
-            ctx.session.lock()
             if ctx.running {
                 ctx.session.wait()
             } else {
                 ctx.running = true
             }
-            ctx.session.unlock()
         }
+        ctx.session.unlock()
         
         var data:Data?
         var filename:String?

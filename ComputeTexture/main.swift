@@ -28,8 +28,11 @@ class Context {
     
     var gputrace = false
     
-    var lock:NSLock = .init()
+    let first = NSLock()
     var id:String?
+    
+    let condition = NSCondition()
+    var uploading = 0
     
     init(device:MTLDevice) {
         self.device = device
@@ -73,9 +76,9 @@ extension MTKTextureLoader {
         let task = URLSession.shared.dataTask(with: .init(url: components.url!)) { raw, rsp, err in
             if let rsp = rsp as? HTTPURLResponse {
                 if let group = rsp.value(forHTTPHeaderField: "Compute-Group"), ctx.id == nil {
-                    ctx.lock.lock()
+                    ctx.first.lock()
                     ctx.id = group
-                    ctx.lock.unlock()
+                    ctx.first.unlock()
                 }
                 
                 switch rsp.statusCode {
@@ -150,7 +153,7 @@ func draw(_ ctx:Context, queue:Int) throws {
     let loader = MTKTextureLoader(device: ctx.device)
     let textures = try loader.newTexture(ctx, semaphore: ctx.semaphore.loading[queue])
     let albedo = textures[0]
-    let source = albedo.texture!
+    let source:MTLTexture! = albedo.texture!
     
     print("LOAD \(albedo.path) \(String(describing: albedo.texture))")
     
@@ -169,6 +172,7 @@ func draw(_ ctx:Context, queue:Int) throws {
             MTLCaptureManager.shared().stopCapture()
         }
     }
+    
     guard let buffer = ctx.queue[queue].makeCommandBuffer() else {return}
     
     let td = MTLTextureDescriptor()
@@ -247,16 +251,16 @@ func draw(_ ctx:Context, queue:Int) throws {
     }
     
     buffer.addCompletedHandler { _ in
-        source.setPurgeableState(.volatile)
-        target.setPurgeableState(.volatile)
+        source.setPurgeableState(.empty)
+        target.setPurgeableState(.empty)
     }
     
     buffer.commit()
     buffer.waitUntilCompleted()
     
     defer {
-        stats.setPurgeableState(.volatile)
-        image.setPurgeableState(.volatile)
+        stats.setPurgeableState(.empty)
+        image.setPurgeableState(.empty)
     }
     
     let level = stats.contents().advanced(by: 0).load(as: Int32.self)
@@ -273,7 +277,6 @@ func draw(_ ctx:Context, queue:Int) throws {
                          colorSpaceName: .deviceRGB,
                          bytesPerRow: size.width*4,
                          bitsPerPixel: 32)
-        
         if let data = bitmap?.representation(using: .png, properties: [:]) {
             var components = URLComponents(string: "http://\(SERVER_ADDRESS)/compute")!
             components.queryItems = [
@@ -286,10 +289,16 @@ func draw(_ ctx:Context, queue:Int) throws {
             req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
             req.setValue("\(count)/\(td.width*td.height)", forHTTPHeaderField: "Compute-Ratio")
             req.httpBody = data
+            
+            ctx.uploading += 1
             URLSession.shared.dataTask(with: req, completionHandler: { _, rsp, _ in
                 if let rsp = rsp as? HTTPURLResponse {
                     print("SEND \(albedo.path) \(rsp.statusCode)")
                 }
+                ctx.condition.lock()
+                ctx.uploading -= 1
+                ctx.condition.signal()
+                ctx.condition.unlock()
             }).resume()
         }
     }
@@ -322,12 +331,16 @@ if let device = MTLCreateSystemDefaultDevice() {
         let index = i
         queue.async {
             while !compelete {
-                do { try draw(ctx, queue: index) }
-                catch {
-                    if let err = error as? TextureError, err == TextureError.noMoreComputeJob {
-                        compelete = true
-                    } else {
-                        print("ERROR \(error)")
+                autoreleasepool {
+                    do {
+                        try draw(ctx, queue: index)
+                    }
+                    catch {
+                        if let err = error as? TextureError, err == TextureError.noMoreComputeJob {
+                            compelete = true
+                        } else {
+                            print("ERROR \(error)")
+                        }
                     }
                 }
             }
@@ -336,6 +349,12 @@ if let device = MTLCreateSystemDefaultDevice() {
     }
     
     for i in 0..<ctx.semaphore.compute.count { ctx.semaphore.compute[i].wait() }
+    
+    while ctx.uploading > 0 {
+        ctx.condition.lock()
+        ctx.condition.wait()
+        ctx.condition.unlock()
+    }
     
     var components = URLComponents(string: "http://\(SERVER_ADDRESS)/compute/summary")!
     components.queryItems = [.init(name: "id", value: ctx.id)]

@@ -307,7 +307,7 @@ func draw(_ ctx:Context, queue:Int) throws {
             ctx.condition.unlock()
             URLSession.shared.dataTask(with: req, completionHandler: { _, rsp, _ in
                 if let rsp = rsp as? HTTPURLResponse {
-                    print("SEND \(albedo.path) \(rsp.statusCode)")
+                    print("SEND \(albedo.path) \(rsp.statusCode) #\(count)")
                 }
                 ctx.condition.lock()
                 ctx.uploading -= 1

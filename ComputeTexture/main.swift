@@ -153,7 +153,7 @@ func draw(_ ctx:Context, queue:Int) throws {
     let loader = MTKTextureLoader(device: ctx.device)
     let textures = try loader.newTexture(ctx, semaphore: ctx.semaphore.loading[queue])
     let albedo = textures[0]
-    let source:MTLTexture! = albedo.texture!
+    let source = albedo.texture!
     
     print("LOAD \(albedo.path) \(String(describing: albedo.texture))")
     

@@ -28,7 +28,8 @@ class Context {
     
     var gputrace = false
     
-    let first = NSLock()
+    var running = false;
+    let session = NSCondition()
     var id:String?
     
     let condition = NSCondition()
@@ -65,6 +66,18 @@ struct TextureContext {
 
 extension MTKTextureLoader {
     func newTexture(_ ctx: Context, semaphore:DispatchSemaphore) throws -> [TextureContext] {
+        while ctx.id == nil {
+            ctx.session.lock()
+            if ctx.running {
+                ctx.session.wait()
+            } else {
+                ctx.running = true
+                ctx.session.unlock()
+                break
+            }
+            ctx.session.unlock()
+        }
+        
         var data:Data?
         var filename:String?
         var components = URLComponents(string: "http://\(SERVER_ADDRESS)/compute")!
@@ -76,9 +89,10 @@ extension MTKTextureLoader {
         let task = URLSession.shared.dataTask(with: .init(url: components.url!)) { raw, rsp, err in
             if let rsp = rsp as? HTTPURLResponse {
                 if let group = rsp.value(forHTTPHeaderField: "Compute-Group"), ctx.id == nil {
-                    ctx.first.lock()
+                    ctx.session.lock()
                     ctx.id = group
-                    ctx.first.unlock()
+                    ctx.session.signal()
+                    ctx.session.unlock()
                 }
                 
                 switch rsp.statusCode {

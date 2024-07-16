@@ -24,7 +24,7 @@ kernel void compute(texture2d<half, access::read >  source [[texture(0)]],
 {
     if (position.x > uniform->screen.x || position.y > uniform->screen.y) return;
     half4 color = source.read(position);
-    half4 value = color;
+    half4 value = color * uniform->brightness.y;
     
     half4 mraColor(0);
     if (hasmra) {

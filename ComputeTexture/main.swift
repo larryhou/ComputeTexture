@@ -55,11 +55,18 @@ enum TextureError: Error {
 }
 
 struct TextureContext {
+    // OFFSET 00
     var sizeX: Int
     var sizeY: Int
     var srgb: Int
     var format: Int
-    var brightness:Float
+    // OFFSET 08
+    var brightness:Float = 1.0
+    var type:Int = 0
+    var hasMRA:Bool = false
+    // OFFSET 16
+    var brightnessCurve:Float = 1.0
+    
     var path: String
     var texture:MTLTexture!
 }
@@ -142,20 +149,26 @@ extension MTKTextureLoader {
         let size = Int(ptr.advanced(by: total-4).load(as: Int32.self))
         ptr = ptr.advanced(by: (size + 3) & ~3)
         
-        var ctx:TextureContext = .init(sizeX: 0, sizeY: 0, srgb: 0, format: 0, brightness: 0, path: "")
-        ctx.sizeX  = Int(ptr.advanced(by: 0).load(as: Int16.self))
-        ctx.sizeY  = Int(ptr.advanced(by: 2).load(as: Int16.self))
-        ctx.srgb   = Int(ptr.advanced(by: 4).load(as: Int16.self))
-        ctx.format = Int(ptr.advanced(by: 6).load(as: Int16.self))
-        ctx.brightness = ptr.advanced(by: 8).load(as: Float.self)
+        var ctx:TextureContext = .init(sizeX: 0, sizeY: 0, srgb: 0, format: 0, path: "")
+        // OFFSET 00
+        ctx.sizeX  = Int(ptr.advanced(by:  0).load(as: Int16.self))
+        ctx.sizeY  = Int(ptr.advanced(by:  2).load(as: Int16.self))
+        ctx.srgb   = Int(ptr.advanced(by:  4).load(as: Int16.self))
+        ctx.format = Int(ptr.advanced(by:  6).load(as: Int16.self))
+        // OFFSET 08
+        ctx.brightness = ptr.advanced(by:  8).load(as: Float.self)
+        ctx.type   = Int(ptr.advanced(by: 12).load(as: Int16.self))
+        ctx.hasMRA     = ptr.advanced(by: 14).load(as: Int16.self) != 0
+        // OFFSET 16
+        ctx.brightnessCurve = ptr.advanced(by: 16).load(as: Float.self)
         
-        let base = offset+4
-        ctx.texture = try newTexture(data: data.subdata(in: base..<base+size), options: [
+        let fileOffset = offset+4
+        ctx.texture = try newTexture(data: data.subdata(in: fileOffset..<fileOffset+size), options: [
             .SRGB: NSNumber(value: 0),
             .textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue),
             .textureStorageMode: NSNumber(value: MTLStorageMode.private.rawValue),
         ])
-        return (ctx, offset + 4 + total)
+        return (ctx, fileOffset + total)
     }
 }
 
@@ -189,7 +202,7 @@ func draw(_ ctx:Context, queue:Int) throws {
     
     let td = MTLTextureDescriptor()
     td.textureType = source.textureType
-    td.pixelFormat = .rgba8Unorm
+    td.pixelFormat = source.pixelFormat
     td.usage = [.shaderRead, .shaderWrite]
     td.mipmapLevelCount = source.mipmapLevelCount
     td.width = source.width
@@ -200,7 +213,7 @@ func draw(_ ctx:Context, queue:Int) throws {
     
     let stats = ctx.device.makeBuffer(length: 128, options: [.storageModeShared])!
     var uniform = Uniform(
-        brightness: albedo.brightness,
+        brightness: simd_float2(albedo.brightness, albedo.brightnessCurve),
         screen: simd_float2(Float(td.width), Float(td.height)),
         threshold: Int32(COLOR_CHANNEL_THRESHOLD),
         srgb: Int32(albedo.srgb)

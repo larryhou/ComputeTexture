@@ -10,7 +10,7 @@
 #include <simd/simd.h>
 
 struct Uniform {
-    float brightness;
+    simd_float2 brightness;
     simd_float2 screen;
     int threshold;
     int srgb;
